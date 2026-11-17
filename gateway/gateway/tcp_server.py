@@ -4,36 +4,31 @@
 
 线上首字节决定模式：
     0x01 enroll  → 配对（HMAC 挑战应答，明文帧）
-    0x02 session → Noise_KK 握手（设备先发 8 字节 tag 定位公钥）
+    0x02 session → Noise_KK 握手（设备先发 8 字节公钥 tag 定位身份）
+
+身份 = 静态公钥；设备名只是可变标签，改名不影响连接。
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 
 from .audit import AuditLog
 from .channel import NoiseChannel
-from .keystore import KeyStore
+from .keystore import KeyStore, device_tag  # noqa: F401 - device_tag 供测试与外部使用
 from .noise_wire import (
     HANDSHAKE_TIMEOUT_S,
     MODE_ENROLL,
     MODE_SESSION,
     TAG_LEN,
     WireError,
-    server_handshake,
     enroll,
-    read_message,
+    server_handshake,
 )
 from .pairing import PairingManager
 from .ratelimit import AuthRateLimiter
 from .registry import DeviceRegistry
 from .session import run_device_session
-
-
-def device_tag(name: str) -> bytes:
-    """设备名 → 8 字节定位标签（哈希前缀，不泄露明文设备名）。"""
-    return hashlib.sha256(name.encode("utf-8")).digest()[:TAG_LEN]
 
 
 async def _handle_conn(
@@ -77,10 +72,8 @@ async def _handle_conn(
             except asyncio.TimeoutError as e:
                 raise WireError("读取设备标签超时") from e
 
-            matched = next(
-                (d for d in store.devices() if device_tag(d.name) == tag),
-                None,
-            )
+            # 按公钥标签定位——改名后 tag 不变，因此仍能连上
+            matched = store.find_by_tag(tag)
             if matched is None:
                 limiter.record_fail(ip)
                 await audit.log("auth_fail", ip=ip, reason="unknown_device")
@@ -104,6 +97,8 @@ async def _handle_conn(
                 audit,
                 ip,
                 expected_device_id=matched.name,
+                allow_rename=True,  # 名字只是标签，设备可自报新名（在线唯一仍校验）
+                keystore=store,
             )
             return
 

@@ -31,7 +31,8 @@ from gateway.noise_wire import (
 from gateway.pairing import PairingManager, compute_proof, derive_key, normalize
 from gateway.ratelimit import AuthRateLimiter
 from gateway.registry import DeviceRegistry
-from gateway.tcp_server import device_tag, start_tcp_server
+from gateway.keystore import device_tag
+from gateway.tcp_server import start_tcp_server
 
 
 # ---------------------------------------------------------------- 测试夹具
@@ -116,9 +117,9 @@ def _pairing_salt(server: _TestServer, name: str) -> bytes:
 
 
 async def noise_session(server: _TestServer, priv: bytes, pub: bytes, name: str = "mi14"):
-    """建立 Noise_KK 会话，返回 (conn, reader, writer)。"""
+    """建立 Noise_KK 会话，返回 (conn, reader, writer)。tag 由**公钥**派生。"""
     reader, writer = await server.open()
-    writer.write(bytes([MODE_SESSION]) + device_tag(name))
+    writer.write(bytes([MODE_SESSION]) + device_tag(pub))
     await writer.drain()
 
     conn = NoiseConnection.from_name(PATTERN)
@@ -230,7 +231,7 @@ async def test_session_requires_pairing(server):
     """未配对设备的 tag 查不到 → 直接断开（不进入握手）。"""
     _, dev_pub = gen_keypair()
     reader, writer = await server.open()
-    writer.write(bytes([MODE_SESSION]) + device_tag("ghost"))
+    writer.write(bytes([MODE_SESSION]) + device_tag(dev_pub))  # 未登记的公钥
     await writer.drain()
     data = await asyncio.wait_for(reader.read(1), 5)
     assert data == b""  # 对端已关闭
@@ -286,16 +287,46 @@ async def test_session_large_message_chunking(server):
 
 
 @pytest.mark.asyncio
-async def test_session_identity_bound_to_pairing(server):
-    """hello 自报的名字与配对身份不符 → 拒绝（防已配对设备冒充他人）。"""
+async def test_session_rename_is_allowed_and_persisted(server):
+    """身份=公钥，名字只是标签：改名后仍能连上，keystore 标签随之更新。"""
     code = server.pairing.issue("mi14")
-    dev_priv, dev_pub = await enroll_client(server, code)
-    conn, reader, writer = await noise_session(server, dev_priv, dev_pub)
+    dev_priv, dev_pub = await enroll_client(server, code, name="mi14")
+    assert server.store.device("mi14") is not None
 
-    await send_enc(conn, writer, hello_payload(name="other-device"))
+    # 用**同一个公钥**的 tag 连接（改名不影响 tag），但 hello 里报新名字
+    conn, reader, writer = await noise_session(server, dev_priv, dev_pub)
+    await send_enc(conn, writer, hello_payload(name="my-new-name"))
+    ack = await recv_enc(conn, reader)
+    assert ack["type"] == "hello_ack", f"改名后应正常注册: {ack}"
+
+    # 在线身份用新名
+    assert server.registry.get("my-new-name") is not None
+    # keystore 标签已迁移（旧名不再存在，且不是新增一条）
+    assert server.store.device("mi14") is None
+    renamed = server.store.device("my-new-name")
+    assert renamed is not None and renamed.public_key == dev_pub
+    assert len(server.store.devices()) == 1, "改名不应产生额外条目"
+    writer.close()
+
+
+@pytest.mark.asyncio
+async def test_session_rename_to_taken_name_rejected(server):
+    """已配对的另一台设备占用了目标名字 → 改名被拒（防冒名顶替在线身份）。"""
+    # 配对两台设备
+    code_a = server.pairing.issue("dev-a")
+    priv_a, pub_a = await enroll_client(server, code_a, name="dev-a")
+    code_b = server.pairing.issue("dev-b")
+    priv_b, pub_b = await enroll_client(server, code_b, name="dev-b")
+
+    # dev-b 试图改名为 dev-a
+    conn, reader, writer = await noise_session(server, priv_b, pub_b)
+    await send_enc(conn, writer, hello_payload(name="dev-a"))
     err = await recv_enc(conn, reader)
     assert err["type"] == "error"
-    assert "不符" in err["payload"]["message"]
+    assert err["payload"]["code"] == "NAME_IN_USE"
+    # 标签未被篡改
+    assert server.store.device("dev-a").public_key == pub_a
+    assert server.store.device("dev-b").public_key == pub_b
     writer.close()
 
 

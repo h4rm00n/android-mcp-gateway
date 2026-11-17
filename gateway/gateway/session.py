@@ -79,11 +79,15 @@ async def run_device_session(
     ip: str,
     *,
     expected_device_id: str | None = None,
+    allow_rename: bool = False,
+    keystore: object | None = None,
 ) -> None:
     """跑完整会话：hello 校验 → 注册 → 消息循环 → 清理。
 
-    `expected_device_id` 由传输层提供（Noise 已通过配对确认身份）；WS 传输传 None，
-    身份取自 hello 自报值。
+    - `expected_device_id`：传输层已确认的身份（Noise 通过公钥配对确认）。
+    - `allow_rename`：允许设备自报与配对标签不同的名字（名字只是标签，身份是公钥）。
+      改名会更新 keystore 里的标签；撞到别人的名字则拒绝。
+    - `keystore`：allow_rename 为真时必需（用于持久化改名）。
     """
     m_id = ""
     try:
@@ -118,16 +122,53 @@ async def run_device_session(
         # ---- 身份：传输层已确认则用之，否则取自报值（协议 §6）----
         declared = payload.get("device_id")
         if expected_device_id is not None:
-            if declared is not None and declared != expected_device_id:
-                await send_error(
-                    channel,
-                    "PROTOCOL_ERROR",
-                    f"hello.device_id 与配对身份不符（已配对为 {expected_device_id}）",
-                    m_id,
-                )
+            if declared is not None and not isinstance(declared, str):
+                await send_error(channel, "PROTOCOL_ERROR", "hello.device_id 类型非法", m_id)
                 await channel.close(CLOSE_PROTOCOL_ERROR)
                 return
-            device_id = expected_device_id
+            if declared is not None and declared != expected_device_id:
+                if not allow_rename:
+                    await send_error(
+                        channel,
+                        "PROTOCOL_ERROR",
+                        f"hello.device_id 与配对身份不符（已配对为 {expected_device_id}）",
+                        m_id,
+                    )
+                    await channel.close(CLOSE_PROTOCOL_ERROR)
+                    return
+                # 允许改名：校验格式与占用，然后更新 keystore 标签
+                if not DEVICE_ID_RE.fullmatch(declared):
+                    await send_error(
+                        channel,
+                        "PROTOCOL_ERROR",
+                        "hello.device_id 不合法（2-32 个非空白字符）",
+                        m_id,
+                    )
+                    await channel.close(CLOSE_PROTOCOL_ERROR)
+                    return
+                if registry.get(declared) is not None:
+                    await send_error(
+                        channel, "NAME_IN_USE", f"设备名 {declared} 已被在线会话占用", m_id
+                    )
+                    await audit.log("auth_fail", ip=ip, device_id=declared, reason="name_in_use")
+                    await channel.close(CLOSE_PROTOCOL_ERROR)
+                    return
+                if keystore is not None:
+                    try:
+                        keystore.rename(expected_device_id, declared)  # type: ignore[attr-defined]
+                    except (ValueError, KeyError) as e:
+                        await send_error(channel, "NAME_IN_USE", str(e), m_id)
+                        await audit.log(
+                            "auth_fail", ip=ip, device_id=declared, reason="rename_rejected"
+                        )
+                        await channel.close(CLOSE_PROTOCOL_ERROR)
+                        return
+                await audit.log(
+                    "device_renamed", ip=ip, old=expected_device_id, new=declared
+                )
+                device_id = declared
+            else:
+                device_id = expected_device_id
         else:
             if not isinstance(declared, str) or not DEVICE_ID_RE.fullmatch(declared):
                 await send_error(

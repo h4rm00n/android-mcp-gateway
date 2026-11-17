@@ -13,6 +13,7 @@ snake_case，线上序列化由 SDK 按 alias 输出 camelCase。
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import time
 import uuid
@@ -99,6 +100,7 @@ def build_mcp_server(
     registry: DeviceRegistry,
     audit: AuditLog,
     pairing: PairingManager | None = None,
+    keystore=None,
 ) -> Server:
     def _with_device_param(schema: dict) -> dict:
         """给工具 schema 注入必填 device 参数（仅 MCP 层，设备端 schema 不含它）。
@@ -164,6 +166,46 @@ def build_mcp_server(
                     ),
                 }
             )
+
+        if tool == "list_paired_devices":
+            if keystore is None:
+                return _err_result("TOOL_NOT_FOUND", "配对管理未启用（网关未开启 tcp.enabled）")
+            entries = []
+            for d in keystore.devices():
+                session = registry.get(d.name)
+                entries.append(
+                    {
+                        "device": d.name,
+                        "public_key_fp": base64.b64encode(d.public_key).decode()[:16] + "…",
+                        "paired_at": d.paired_at,
+                        "renamed_at": d.renamed_at,
+                        "online": session is not None,
+                        "model": session.model if session else None,
+                    }
+                )
+            return _ok_result(
+                {
+                    "paired": entries,
+                    "count": len(entries),
+                    "note": "身份=设备公钥，名字只是标签；改名不会丢失配对",
+                }
+            )
+
+        if tool == "unpair_device":
+            if keystore is None:
+                return _err_result("TOOL_NOT_FOUND", "配对管理未启用（网关未开启 tcp.enabled）")
+            target = str((params.arguments or {}).get("target", "") or "").strip()
+            if not target:
+                return _err_result("ARGS_INVALID", "target 必填（设备名）")
+            removed = keystore.unpair(target)
+            if not removed:
+                return _err_result("DEVICE_NOT_FOUND", f"未找到已配对设备: {target}")
+            await audit.log("unpaired", device_id=target)
+            # 若该设备当前在线，断开其会话（吊销立即生效）
+            session = registry.get(target)
+            if session is not None:
+                await session.ws.close(4004)
+            return _ok_result({"unpaired": target, "disconnected": session is not None})
 
         if tool == "list_devices":
             devices = registry.snapshot()

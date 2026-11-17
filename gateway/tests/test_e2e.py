@@ -167,6 +167,8 @@ async def test_mcp_list_and_call_roundtrip(tmp_path):
                 "device_status",
                 "list_devices",           # 网关本地工具
                 "generate_pairing_code",  # 网关本地工具（配对）
+                "list_paired_devices",    # 网关本地工具（配对管理）
+                "unpair_device",          # 网关本地工具（吊销）
             }
             # MCP 层注入的 device 参数：必填自由字符串（自报登记制，无 enum）
             create = next(t for t in tools.tools if t.name == "calendar_create_event")
@@ -215,7 +217,7 @@ async def test_device_routing_and_offline(tmp_path):
         async with mcp_client(port) as session:
             await session.initialize()
             tools = await session.list_tools()
-            assert len(tools.tools) == 11
+            assert len(tools.tools) == 13
 
             # list_devices：网关本地工具，无设备时也能回答，无 device 参数
             result = await session.call_tool("list_devices", {})

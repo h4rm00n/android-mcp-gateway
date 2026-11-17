@@ -37,9 +37,9 @@ object NoiseWire {
     const val MAX_MESSAGE = 256 * 1024
     const val TAG_LEN = 8
 
-    fun deviceTag(name: String): ByteArray =
-        MessageDigest.getInstance("SHA-256").digest(name.toByteArray(Charsets.UTF_8))
-            .copyOf(TAG_LEN)
+    /** 公钥 → 8 字节标签（身份=公钥，改名不影响连接）。 */
+    fun deviceTag(publicKey: ByteArray): ByteArray =
+        MessageDigest.getInstance("SHA-256").digest(publicKey).copyOf(TAG_LEN)
 
     fun writePlain(out: DataOutputStream, payload: ByteArray) {
         require(payload.size <= MAX_MESSAGE) { "帧超限" }
@@ -283,7 +283,7 @@ object NoiseClient {
 
     /** 建立 Noise_KK 会话。返回已就绪的 NoiseSession。 */
     fun connect(ctx: Context, paired: PairedGateway, devName: String): NoiseSession {
-        val (devPriv, _) = DeviceKeys.loadOrCreate(ctx)
+        val (devPriv, devPub) = DeviceKeys.loadOrCreate(ctx)
         val gwPub = NoiseWire.unb64(paired.gatewayPublicKeyB64)
 
         val socket = Socket()
@@ -294,7 +294,7 @@ object NoiseClient {
         val input = DataInputStream(socket.getInputStream().buffered())
 
         out.writeByte(NoiseWire.MODE_SESSION)
-        out.write(NoiseWire.deviceTag(devName))
+        out.write(NoiseWire.deviceTag(devPub))  // 身份=公钥，改名不影响
         out.flush()
 
         val hs = HandshakeState(NoiseWire.PATTERN, HandshakeState.INITIATOR)

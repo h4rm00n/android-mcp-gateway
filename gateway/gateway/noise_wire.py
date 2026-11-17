@@ -183,7 +183,13 @@ async def enroll(
         raise WireError("配对码校验失败")
 
     pairing.note_success(ip)
-    store.pair(name, dev_pub)
+    try:
+        store.pair(name, dev_pub)
+    except ValueError as e:
+        # 名字被另一台设备占用：明确拒绝，不覆盖
+        await audit.log("enroll_fail", ip=ip, device_id=name, reason="name_taken")
+        await write_plain_frame(writer, json.dumps({"ok": False, "err": str(e)}).encode())
+        raise WireError(str(e)) from e
     await audit.log("paired", ip=ip, device_id=name)
 
     # 反向证明：设备据此确认自己没被中间人盯上（网关也持有同一个 K）

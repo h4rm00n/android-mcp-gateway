@@ -64,7 +64,7 @@ def create_app(cfg: GatewayConfig) -> Starlette:
     pairing: PairingManager | None = PairingManager(ttl=cfg.tcp.pairing_ttl_s) if cfg.tcp.enabled else None
     store: KeyStore | None = KeyStore(cfg.tcp.keystore) if cfg.tcp.enabled else None
 
-    mcp_server = build_mcp_server(cfg, registry, audit, pairing)
+    mcp_server = build_mcp_server(cfg, registry, audit, pairing, store)
     # stateless + json_response：单用户场景的最小形态，无 SSE 流、无会话粘滞
     # allowed_hosts：DNS rebinding 防护（反代场景填对外域名/IP；留空则关闭该校验）
     security = None

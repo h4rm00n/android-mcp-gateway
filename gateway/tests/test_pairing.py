@@ -197,17 +197,83 @@ def test_keystore_pair_and_unpair(tmp_path):
     assert KeyStore(tmp_path / "k.json").device("mi14") is None
 
 
+def test_keystore_rename_migrates_label(tmp_path):
+    """改名：条目不增加，公钥不变，renamed_at 记录时间。"""
+    ks = KeyStore(tmp_path / "k.json")
+    _, pub = gen_keypair()
+    ks.pair("mi14", pub)
+    renamed = ks.rename("mi14", "my-phone")
+    assert renamed.name == "my-phone" and renamed.public_key == pub
+    assert renamed.renamed_at is not None
+    assert ks.device("mi14") is None
+    assert len(ks.devices()) == 1
+    assert KeyStore(tmp_path / "k.json").device("my-phone").public_key == pub
+
+
+def test_keystore_rename_rejects_taken_name(tmp_path):
+    ks = KeyStore(tmp_path / "k.json")
+    _, pub_a = gen_keypair()
+    _, pub_b = gen_keypair()
+    ks.pair("dev-a", pub_a)
+    ks.pair("dev-b", pub_b)
+    with pytest.raises(ValueError, match="已被另一台"):
+        ks.rename("dev-b", "dev-a")
+    # 未被篡改
+    assert ks.device("dev-a").public_key == pub_a
+    assert ks.device("dev-b").public_key == pub_b
+
+
+def test_keystore_rename_to_same_name_is_noop(tmp_path):
+    ks = KeyStore(tmp_path / "k.json")
+    _, pub = gen_keypair()
+    ks.pair("mi14", pub)
+    assert ks.rename("mi14", "mi14").name == "mi14"
+
+
+def test_keystore_pair_same_key_migrates_not_duplicates(tmp_path):
+    """同一公钥再次配对（改名重配对）→ 迁移标签，不留两条记录。"""
+    ks = KeyStore(tmp_path / "k.json")
+    _, pub = gen_keypair()
+    ks.pair("mi14", pub)
+    ks.pair("new-name", pub)
+    assert ks.device("mi14") is None
+    assert ks.device("new-name").public_key == pub
+    assert len(ks.devices()) == 1
+
+
+def test_keystore_pair_name_taken_by_other_key(tmp_path):
+    ks = KeyStore(tmp_path / "k.json")
+    _, pub_a = gen_keypair()
+    _, pub_b = gen_keypair()
+    ks.pair("mi14", pub_a)
+    with pytest.raises(ValueError, match="已被另一台"):
+        ks.pair("mi14", pub_b)
+    assert ks.device("mi14").public_key == pub_a
+
+
+def test_keystore_unpair_by_public_key(tmp_path):
+    ks = KeyStore(tmp_path / "k.json")
+    _, pub = gen_keypair()
+    ks.pair("mi14", pub)
+    assert ks.unpair_by_public_key(pub) is not None
+    assert ks.device("mi14") is None
+    assert ks.unpair_by_public_key(pub) is None
+
+
 def test_keystore_rejects_bad_key_length(tmp_path):
     ks = KeyStore(tmp_path / "k.json")
     with pytest.raises(ValueError):
         ks.pair("mi14", b"short")
 
 
-def test_device_tag_is_stable_and_short():
-    from gateway.tcp_server import device_tag
+def test_device_tag_derived_from_public_key():
+    """身份=公钥：同一个公钥恒得同一 tag，不同公钥不同 tag。"""
+    from gateway.keystore import device_tag
 
-    assert len(device_tag("mi14")) == 8
-    assert device_tag("mi14") == device_tag("mi14")
-    assert device_tag("mi14") != device_tag("mi15")
-    # 不泄露明文
-    assert b"mi14" not in device_tag("mi14")
+    _, pub_a = gen_keypair()
+    _, pub_b = gen_keypair()
+    assert len(device_tag(pub_a)) == 8
+    assert device_tag(pub_a) == device_tag(pub_a)
+    assert device_tag(pub_a) != device_tag(pub_b)
+    # 不泄露公钥前缀
+    assert pub_a[:8] not in device_tag(pub_a)

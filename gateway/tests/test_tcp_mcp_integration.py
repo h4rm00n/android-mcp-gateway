@@ -31,7 +31,7 @@ from gateway.noise_wire import (
     write_plain_frame,
 )
 from gateway.pairing import compute_proof, derive_key, pairing_salt
-from gateway.tcp_server import device_tag
+from gateway.keystore import device_tag
 
 MCP_TOKEN = "m" * 32
 DEVICE_NAME = "tcpdev"
@@ -132,9 +132,9 @@ async def pair_device(tcp_port: int, code: str, name: str = DEVICE_NAME):
     return dev_priv, dev_pub
 
 
-async def open_session(tcp_port: int, priv: bytes, gw_pub: bytes, name: str = DEVICE_NAME):
+async def open_session(tcp_port: int, priv: bytes, gw_pub: bytes, dev_pub: bytes, name: str = DEVICE_NAME):
     reader, writer = await asyncio.open_connection("127.0.0.1", tcp_port)
-    writer.write(bytes([MODE_SESSION]) + device_tag(name))
+    writer.write(bytes([MODE_SESSION]) + device_tag(dev_pub))
     await writer.drain()
 
     conn = NoiseConnection.from_name(PATTERN)
@@ -183,7 +183,7 @@ async def test_full_flow_mcp_pairing_then_tool_call(tmp_path):
             ks = KeyStore(tmp_path / "gw.keys")
             gw_pub = ks.gateway_public
 
-            conn, reader, writer = await open_session(tcp_port, dev_priv, gw_pub)
+            conn, reader, writer = await open_session(tcp_port, dev_priv, gw_pub, dev_pub)
             await send(
                 conn, writer,
                 {
@@ -244,9 +244,9 @@ async def test_pairing_code_rejected_after_use(tmp_path):
 @pytest.mark.asyncio
 async def test_unpaired_cannot_connect(tmp_path):
     async with running_gateway(tmp_path) as (_http_port, tcp_port):
-        _priv, _pub = gen_keypair()
+        _priv, unpaired_pub = gen_keypair()
         reader, writer = await asyncio.open_connection("127.0.0.1", tcp_port)
-        writer.write(bytes([MODE_SESSION]) + device_tag("never-paired"))
+        writer.write(bytes([MODE_SESSION]) + device_tag(unpaired_pub))
         await writer.drain()
         data = await asyncio.wait_for(reader.read(1), 5)
         assert data == b"", "未配对设备应被直接断开"

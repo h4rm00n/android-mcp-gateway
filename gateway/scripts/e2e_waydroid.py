@@ -43,7 +43,7 @@ async def main() -> None:
 
             tools = await session.list_tools()
             print(f"1. tools/list: {len(tools.tools)} 个工具 {[t.name for t in tools.tools]}")
-            assert len(tools.tools) == 11  # 9 设备工具 + list_devices + generate_pairing_code
+            assert len(tools.tools) == 13  # 9 设备工具 + 4 网关本地工具
 
             print("2. device_status")
             status = await call(session, "device_status", {}, "真机状态")

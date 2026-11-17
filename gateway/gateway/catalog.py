@@ -314,6 +314,34 @@ GATEWAY_LOCAL_TOOLS: tuple[dict[str, Any], ...] = (
         },
         "timeout_ms": 5_000,
     },
+    {
+        "name": "list_paired_devices",
+        "description": (
+            "列出已配对（持有设备公钥）的设备：名字、配对于何时、是否改名过、当前是否在线。"
+            "用于核对配对记录、清理陈旧条目。不需要 device 参数。"
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "timeout_ms": 5_000,
+    },
+    {
+        "name": "unpair_device",
+        "description": (
+            "吊销一台已配对设备（删除其公钥）。吊销后该设备无法再建立 Noise 会话，"
+            "需要重新配对。用于设备丢失/换机/密钥泄露。不需要 device 参数。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "description": "要吊销的设备名（来自 list_paired_devices）",
+                }
+            },
+            "required": ["target"],
+            "additionalProperties": False,
+        },
+        "timeout_ms": 5_000,
+    },
 )
 
 
