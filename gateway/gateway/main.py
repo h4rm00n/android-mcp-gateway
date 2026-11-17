@@ -19,7 +19,10 @@ from mcp.server.transport_security import TransportSecuritySettings
 from .audit import AuditLog
 from .config import GatewayConfig, load_config
 from .device_ws import make_device_ws_endpoint
+from .keystore import KeyStore
 from .mcp_app import build_mcp_server
+from .pairing import PairingManager
+from .tcp_server import start_tcp_server
 from .ratelimit import AuthRateLimiter
 from .registry import DeviceRegistry
 
@@ -57,7 +60,11 @@ def create_app(cfg: GatewayConfig) -> Starlette:
     limiter = AuthRateLimiter()
     audit = AuditLog(cfg.audit_log, cfg.audit_max_bytes, cfg.audit_backups)
 
-    mcp_server = build_mcp_server(cfg, registry, audit)
+    # 裸 TCP + Noise 传输（tcp.enabled 时启用）
+    pairing: PairingManager | None = PairingManager(ttl=cfg.tcp.pairing_ttl_s) if cfg.tcp.enabled else None
+    store: KeyStore | None = KeyStore(cfg.tcp.keystore) if cfg.tcp.enabled else None
+
+    mcp_server = build_mcp_server(cfg, registry, audit, pairing, store)
     # stateless + json_response：单用户场景的最小形态，无 SSE 流、无会话粘滞
     # allowed_hosts：DNS rebinding 防护（反代场景填对外域名/IP；留空则关闭该校验）
     security = None
@@ -74,8 +81,23 @@ def create_app(cfg: GatewayConfig) -> Starlette:
 
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette):
+        tcp_server = None
+        if cfg.tcp.enabled and store is not None and pairing is not None:
+            tcp_server = await start_tcp_server(
+                cfg.tcp.host, cfg.tcp.port, store, pairing, registry, limiter, audit
+            )
+            print(
+                f"info: 裸 TCP(Noise) 传输已监听 {cfg.tcp.host}:{cfg.tcp.port}"
+                f"（已配对设备 {len(store.devices())} 台）",
+                file=sys.stderr,
+            )
         async with session_manager.run():
-            yield
+            try:
+                yield
+            finally:
+                if tcp_server is not None:
+                    tcp_server.close()
+                    await tcp_server.wait_closed()
 
     return Starlette(
         lifespan=lifespan,

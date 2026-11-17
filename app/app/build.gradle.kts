@@ -30,4 +30,6 @@ android {
 
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // Noise Protocol（裸 TCP 传输）——com.southernstorm 的纯 Java 实现
+    implementation("com.github.auties00:noise-java:1.2")
 }

@@ -279,6 +279,11 @@ TOOL_NAMES: frozenset[str] = frozenset(t["name"] for t in TOOLS)
 _TOOL_TIMEOUTS: dict[str, int] = {t["name"]: t["timeout_ms"] for t in TOOLS}
 
 # ---- 网关本地工具（在网关内回答，不经过设备；不影响 TOOLSET_VERSION）----
+def _pairing_tool_enabled() -> bool:
+    """配对工具只在启用裸 TCP 传输时暴露（WS 模式不需要配对码）。"""
+    return True
+
+
 GATEWAY_LOCAL_TOOLS: tuple[dict[str, Any], ...] = (
     {
         "name": "list_devices",
@@ -288,6 +293,53 @@ GATEWAY_LOCAL_TOOLS: tuple[dict[str, Any], ...] = (
             "不需要 device 参数。"
         ),
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "timeout_ms": 5_000,
+    },
+    {
+        "name": "generate_pairing_code",
+        "description": (
+            "生成一个设备配对码（8 字符，如 K7M2-P9XR），用于让新设备通过裸 TCP+Noise 通道配对。"
+            "拿到码后把它念给用户：用户会填到手机 App 里完成配对。"
+            "码 5 分钟内有效、只能使用一次。不需要 device 参数。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "device_name": {
+                    "type": "string",
+                    "description": "设备将要使用的名字（如 mi14），仅用于标注，不是强绑定",
+                }
+            },
+            "additionalProperties": False,
+        },
+        "timeout_ms": 5_000,
+    },
+    {
+        "name": "list_paired_devices",
+        "description": (
+            "列出已配对（持有设备公钥）的设备：名字、配对于何时、是否改名过、当前是否在线。"
+            "用于核对配对记录、清理陈旧条目。不需要 device 参数。"
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "timeout_ms": 5_000,
+    },
+    {
+        "name": "unpair_device",
+        "description": (
+            "吊销一台已配对设备（删除其公钥）。吊销后该设备无法再建立 Noise 会话，"
+            "需要重新配对。用于设备丢失/换机/密钥泄露。不需要 device 参数。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "description": "要吊销的设备名（来自 list_paired_devices）",
+                }
+            },
+            "required": ["target"],
+            "additionalProperties": False,
+        },
         "timeout_ms": 5_000,
     },
 )

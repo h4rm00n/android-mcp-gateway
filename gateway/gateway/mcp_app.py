@@ -13,6 +13,7 @@ snake_case，线上序列化由 SDK 按 alias 输出 camelCase。
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import time
 import uuid
@@ -30,6 +31,7 @@ from mcp.types import (
 
 from .audit import AuditLog
 from .catalog import GATEWAY_LOCAL_TOOLS, TOOLS, timeout_for
+from .pairing import PairingManager, format_code
 from .config import GatewayConfig
 from .errors import DeviceCallTimeout, DeviceGone
 from .registry import DeviceRegistry, DeviceSession
@@ -93,7 +95,13 @@ async def _call_device(
         raise DeviceCallTimeout(call_id, tool) from None
 
 
-def build_mcp_server(cfg: GatewayConfig, registry: DeviceRegistry, audit: AuditLog) -> Server:
+def build_mcp_server(
+    cfg: GatewayConfig,
+    registry: DeviceRegistry,
+    audit: AuditLog,
+    pairing: PairingManager | None = None,
+    keystore=None,
+) -> Server:
     def _with_device_param(schema: dict) -> dict:
         """给工具 schema 注入必填 device 参数（仅 MCP 层，设备端 schema 不含它）。
 
@@ -135,6 +143,70 @@ def build_mcp_server(cfg: GatewayConfig, registry: DeviceRegistry, audit: AuditL
         tool = params.name
 
         # ---- 网关本地工具：不经过设备 ----
+        if tool == "generate_pairing_code":
+            if pairing is None:
+                return _err_result(
+                    "TOOL_NOT_FOUND",
+                    "配对码功能未启用（网关未开启 tcp.enabled）",
+                )
+            args_raw = dict(params.arguments or {})
+            label = str(args_raw.get("device_name", "") or "").strip()
+            code = pairing.issue(label)
+            await audit.log("pairing_code_issued", device_id=label or None)
+            return _ok_result(
+                {
+                    "code": code,
+                    "display": format_code(code),
+                    "device_name": label or None,
+                    "expires_in_s": cfg.tcp.pairing_ttl_s,
+                    "pending_codes": pairing.pending_count(),
+                    "usage": (
+                        "把 display 里的码填到手机 App 的「配对码」输入框，点配对。"
+                        "码 5 分钟内有效、只能用一次。"
+                    ),
+                }
+            )
+
+        if tool == "list_paired_devices":
+            if keystore is None:
+                return _err_result("TOOL_NOT_FOUND", "配对管理未启用（网关未开启 tcp.enabled）")
+            entries = []
+            for d in keystore.devices():
+                session = registry.get(d.name)
+                entries.append(
+                    {
+                        "device": d.name,
+                        "public_key_fp": base64.b64encode(d.public_key).decode()[:16] + "…",
+                        "paired_at": d.paired_at,
+                        "renamed_at": d.renamed_at,
+                        "online": session is not None,
+                        "model": session.model if session else None,
+                    }
+                )
+            return _ok_result(
+                {
+                    "paired": entries,
+                    "count": len(entries),
+                    "note": "身份=设备公钥，名字只是标签；改名不会丢失配对",
+                }
+            )
+
+        if tool == "unpair_device":
+            if keystore is None:
+                return _err_result("TOOL_NOT_FOUND", "配对管理未启用（网关未开启 tcp.enabled）")
+            target = str((params.arguments or {}).get("target", "") or "").strip()
+            if not target:
+                return _err_result("ARGS_INVALID", "target 必填（设备名）")
+            removed = keystore.unpair(target)
+            if not removed:
+                return _err_result("DEVICE_NOT_FOUND", f"未找到已配对设备: {target}")
+            await audit.log("unpaired", device_id=target)
+            # 若该设备当前在线，断开其会话（吊销立即生效）
+            session = registry.get(target)
+            if session is not None:
+                await session.ws.close(4004)
+            return _ok_result({"unpaired": target, "disconnected": session is not None})
+
         if tool == "list_devices":
             devices = registry.snapshot()
             online = [d["device"] for d in devices if d["online"]]

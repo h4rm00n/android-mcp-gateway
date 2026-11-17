@@ -12,10 +12,12 @@ gateway/config*.json
 *.jsonl
 *.jsonl.*
 
-# 证书与密钥
+# 证书与密钥（网关静态密钥含私钥，绝不能入库）
 certs/
 *.pem
 *.key
+*.keys
+gateway/gateway.keys
 !.gitignore
 
 # Android
