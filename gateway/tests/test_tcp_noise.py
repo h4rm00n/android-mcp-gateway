@@ -18,13 +18,16 @@ from noise.connection import Keypair, NoiseConnection
 from gateway.audit import AuditLog
 from gateway.keystore import KeyStore, gen_keypair
 from gateway.noise_wire import (
+    FLAG_REJECT,
     MODE_ENROLL,
     MODE_SESSION,
     NOISE_CHUNK,
     PATTERN,
+    REJECT_DEVICE_REVOKED,
     TAG_LEN,
     read_message,
     read_plain_frame,
+    read_plain_frame_ex,
     write_message,
     write_plain_frame,
 )
@@ -347,3 +350,87 @@ async def test_session_tampered_ciphertext_fails(server):
     data = await asyncio.wait_for(reader.read(1), 5)
     assert data == b""
     writer.close()
+
+
+# ---------------------------------------------------------------- 吊销
+
+
+@pytest.mark.asyncio
+async def test_revoked_device_gets_explicit_reject_frame(server):
+    """吊销后重连：必须收到 DEVICE_REVOKED 拒绝帧，而不是只有 EOF。
+
+    设备侧靠这个帧区分"被吊销"与"网络抖动"——收到它就停机等人工重新配对，
+    而不是以退避间隔永远重试。
+    """
+    code = server.pairing.issue("mi14")
+    dev_priv, dev_pub = await enroll_client(server, code)
+
+    # 先正常连一次，确认配对有效
+    conn, r1, w1 = await noise_session(server, dev_priv, dev_pub)
+    await send_enc(conn, w1, hello_payload())
+    await recv_enc(conn, r1)
+    w1.close()
+    await asyncio.sleep(0.05)  # 等服务端会话清理，避免与下面的新连接抢 registry
+
+    # 网关侧吊销
+    assert server.store.unpair("mi14") is True
+    assert server.store.device("mi14") is None
+    assert server.store.is_revoked(device_tag(dev_pub)), "吊销必须留墓碑"
+
+    # 同一把密钥重连：读到拒绝帧（flags bit1），内容指明原因
+    reader, writer = await server.open()
+    writer.write(bytes([MODE_SESSION]) + device_tag(dev_pub))
+    await writer.drain()
+    flags, payload = await asyncio.wait_for(read_plain_frame_ex(reader), 5)
+    assert flags & FLAG_REJECT, f"应带拒绝标记，实际 flags={flags}"
+    body = json.loads(payload.decode())
+    assert body["code"] == REJECT_DEVICE_REVOKED
+    # 拒绝帧之后连接关闭
+    assert await asyncio.wait_for(reader.read(1), 5) == b""
+    writer.close()
+
+
+@pytest.mark.asyncio
+async def test_never_paired_tag_gets_silent_close(server):
+    """从未配对过的 tag：静默断开，不回拒绝帧（不向未认证对端确认任何信息）。"""
+    _, dev_pub = gen_keypair()
+    reader, writer = await server.open()
+    writer.write(bytes([MODE_SESSION]) + device_tag(dev_pub))
+    await writer.drain()
+    # 没有任何拒绝帧，直接 EOF
+    assert await asyncio.wait_for(reader.read(1), 5) == b""
+    writer.close()
+
+
+@pytest.mark.asyncio
+async def test_repair_after_revoke_clears_tombstone(server):
+    """吊销后用新配对码重新配对 → 墓碑清除，连接恢复正常。"""
+    code = server.pairing.issue("mi14")
+    dev_priv, dev_pub = await enroll_client(server, code)
+    server.store.unpair("mi14")
+    assert server.store.is_revoked(device_tag(dev_pub))
+
+    # 重新配对（同一把设备密钥，用户重新索要配对码 = 明确授权）
+    code2 = server.pairing.issue("mi14")
+    dev_priv, dev_pub = await enroll_client(server, code2)
+    assert not server.store.is_revoked(device_tag(dev_pub)), "重新配对应清除墓碑"
+
+    conn, reader, writer = await noise_session(server, dev_priv, dev_pub)
+    await send_enc(conn, writer, hello_payload())
+    ack = await recv_enc(conn, reader)
+    assert ack["type"] == "hello_ack"
+    writer.close()
+
+
+@pytest.mark.asyncio
+async def test_tombstone_survives_restart(tmp_path):
+    """墓碑必须落盘：网关重启后仍能对已吊销设备给出明确原因。"""
+    store_path = tmp_path / "gw.keys"
+    store = KeyStore(store_path)
+    _, pub = gen_keypair()
+    store.pair("mi14", pub)
+    store.unpair("mi14")
+
+    reloaded = KeyStore(store_path)
+    assert reloaded.is_revoked(device_tag(pub))
+    assert reloaded.device("mi14") is None

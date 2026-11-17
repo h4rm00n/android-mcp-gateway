@@ -37,6 +37,18 @@ object NoiseWire {
     const val MAX_MESSAGE = 256 * 1024
     const val TAG_LEN = 8
 
+    /** flags bit0 = 末块（与网关 noise_wire.py 一致）。 */
+    const val FLAG_LAST = 0x01
+
+    /**
+     * flags bit1 = 拒绝帧：网关在 Noise 握手前下发的明文错误（设备已被吊销等）。
+     *
+     * 正常情况下会话的第一个响应是 Noise msg2（随机字节）。若网关只是关掉连接，
+     * App 分不清"被吊销"和"网络抽风"，会当成普通断线无限重试。给拒绝帧打标记位，
+     * 就能在握手阶段确定性识别，无需靠 JSON 首字节去猜。
+     */
+    const val FLAG_REJECT = 0x02
+
     /** 公钥 → 8 字节标签（身份=公钥，改名不影响连接）。 */
     fun deviceTag(publicKey: ByteArray): ByteArray =
         MessageDigest.getInstance("SHA-256").digest(publicKey).copyOf(TAG_LEN)
@@ -46,7 +58,11 @@ object NoiseWire {
         writeChunk(out, payload, last = true)
     }
 
-    fun readPlain(input: DataInputStream): ByteArray = readAllChunks(input) { it }
+    fun readPlain(input: DataInputStream): ByteArray = readPlainEx(input).second
+
+    /** 读明文帧并返回 (首块 flags, payload)：flags 用于区分 Noise msg2 与拒绝帧。 */
+    fun readPlainEx(input: DataInputStream): Pair<Int, ByteArray> =
+        readAllChunks(input) { it }
 
     /** 明文分块 → 逐块加密写出。 */
     fun writeEncrypted(out: DataOutputStream, cipher: CipherState, plaintext: ByteArray) {
@@ -66,7 +82,7 @@ object NoiseWire {
             val pt = ByteArray(ct.size)
             val n = cipher.decryptWithAd(null, ct, 0, pt, 0, ct.size)
             pt.copyOf(n)
-        }
+        }.second
 
     private fun writeChunk(out: DataOutputStream, data: ByteArray, last: Boolean) {
         out.writeInt(data.size)
@@ -75,17 +91,27 @@ object NoiseWire {
         out.flush()
     }
 
-    private fun readAllChunks(input: DataInputStream, transform: (ByteArray) -> ByteArray): ByteArray {
+    /**
+     * 读到末块，返回 (首块 flags, 拼接后的明文)。
+     *
+     * 首块 flags 是拒绝帧的判别依据：拒绝帧恒为单块且末块，因此首块 flags 就够用。
+     */
+    private fun readAllChunks(
+        input: DataInputStream,
+        transform: (ByteArray) -> ByteArray,
+    ): Pair<Int, ByteArray> {
         val buf = java.io.ByteArrayOutputStream()
+        var firstFlags = -1
         while (true) {
             val len = input.readInt()
             if (len < 0 || len > MAX_MESSAGE) error("块长度非法: $len")
             val flags = input.readUnsignedByte()
+            if (firstFlags == -1) firstFlags = flags
             val chunk = ByteArray(len)
             input.readFully(chunk)
             buf.write(transform(chunk))
             if (buf.size() > MAX_MESSAGE) error("消息累计超限")
-            if (flags and 1 != 0) return buf.toByteArray()
+            if (flags and FLAG_LAST != 0) return firstFlags to buf.toByteArray()
         }
     }
 
@@ -307,7 +333,21 @@ object NoiseClient {
         val n1 = hs.writeMessage(msg1, 0, null, 0, 0)
         NoiseWire.writePlain(out, msg1.copyOf(n1))
 
-        val msg2 = NoiseWire.readPlain(input)
+        // 下一个响应可能是 Noise msg2，也可能是网关的拒绝帧（设备已被吊销）。
+        // 拒绝帧带 FLAG_REJECT，据此区分——不能靠"解析失败"来猜，否则网络异常
+        // 会伪装成吊销，把设备误置成停机状态。
+        val (flags, msg2) = NoiseWire.readPlainEx(input)
+        if (flags and NoiseWire.FLAG_REJECT != 0) {
+            hs.destroy()
+            runCatching { socket.close() }
+            val body = runCatching { JSONObject(String(msg2, Charsets.UTF_8)) }.getOrNull()
+            throw DeviceRevokedException(
+                body?.optString("code") ?: "REJECTED",
+                body?.optString("message").takeUnless { it.isNullOrBlank() }
+                    ?: "网关拒绝了本设备的连接",
+            )
+        }
+
         val payloadBuf = ByteArray(1024) // KK 无载荷，但给个非零缓冲更稳妥
         hs.readMessage(msg2, 0, msg2.size, payloadBuf, 0)
         val pair: CipherStatePair = hs.split()
@@ -316,6 +356,14 @@ object NoiseClient {
         return NoiseSession(socket, pair.sender, pair.receiver)
     }
 }
+
+/**
+ * 网关在 Noise 握手阶段明确拒绝：设备已被吊销。
+ *
+ * 与普通连接失败的区别在于**不可重试**——重试只会一直撞同一堵墙。收到它说明
+ * 网关侧已经没有本设备的公钥，唯一出路是让 AI 重新生成配对码、用户手动重配对。
+ */
+class DeviceRevokedException(val code: String, message: String) : Exception(message)
 
 /** 配对密码学：与网关 pairing.py 逐字节对齐。 */
 object PairingCrypto {

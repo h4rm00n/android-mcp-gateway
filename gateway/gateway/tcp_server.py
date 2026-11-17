@@ -20,10 +20,12 @@ from .noise_wire import (
     HANDSHAKE_TIMEOUT_S,
     MODE_ENROLL,
     MODE_SESSION,
+    REJECT_DEVICE_REVOKED,
     TAG_LEN,
     WireError,
     enroll,
     server_handshake,
+    write_reject_frame,
 )
 from .pairing import PairingManager
 from .ratelimit import AuthRateLimiter
@@ -76,6 +78,17 @@ async def _handle_conn(
             matched = store.find_by_tag(tag)
             if matched is None:
                 limiter.record_fail(ip)
+                if store.is_revoked(tag):
+                    # 曾经配对过、已被吊销：回一个明确原因，设备据此停机等人工重新配对。
+                    # 否则设备只会看到连接被关，当成网络抖动无限重试。
+                    await audit.log("auth_fail", ip=ip, reason="device_revoked")
+                    await write_reject_frame(
+                        writer,
+                        REJECT_DEVICE_REVOKED,
+                        "该设备已被网关吊销，需要在网关上重新生成配对码再配对",
+                    )
+                    raise WireError("设备已被吊销")
+                # 从没配对过的 tag：静默断开，不向未认证对端确认任何信息
                 await audit.log("auth_fail", ip=ip, reason="unknown_device")
                 raise WireError("未配对的设备")
 

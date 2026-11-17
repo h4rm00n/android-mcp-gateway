@@ -12,12 +12,18 @@
   "gateway_public":  "<base64 32B>",
   "devices": {
     "mi14": {"public_key": "<base64 32B>", "paired_at": 1765000000000, "renamed_at": null}
-  }
+  },
+  "revoked_tags": ["<base64 8B>"]
 }
 ```
 
 `devices` 的键是当前标签（名字）。公钥才是主键——`pair()` 遇到同公钥已存在时会
 迁移标签而不是新增一条，避免同一台设备留下多条陈旧记录。
+
+`revoked_tags` 是**吊销墓碑**：只存公钥标签（SHA256 前 8 字节），不存公钥本身。
+它存在的唯一目的是区分"从没配对过的 tag"与"配对过但被吊销的 tag"——后者重连时
+要回一个明确的 `DEVICE_REVOKED` 拒绝帧，否则设备只会看到连接被关，当成网络问题
+无限重试。重新配对同一把密钥时墓碑会被清掉。
 """
 
 from __future__ import annotations
@@ -73,6 +79,7 @@ class KeyStore:
         self._gateway_private: bytes = b""
         self._gateway_public: bytes = b""
         self._devices: dict[str, PairedDevice] = {}  # name → entry
+        self._revoked_tags: set[bytes] = set()  # 吊销墓碑（公钥标签）
         self._load()
 
     # ---- 访问 ----
@@ -97,6 +104,14 @@ class KeyStore:
     def find_by_tag(self, tag: bytes) -> PairedDevice | None:
         """会话建立用：按公钥标签定位设备。"""
         return next((d for d in self._devices.values() if device_tag(d.public_key) == tag), None)
+
+    def is_revoked(self, tag: bytes) -> bool:
+        """tag 是否属于**曾经配对过、之后被吊销**的设备。
+
+        与 `find_by_tag() is None` 的区别很重要：从没配对过的 tag 必须静默断开
+        （不向未认证对端确认任何信息），只有确知被吊销的才回拒绝帧。
+        """
+        return tag in self._revoked_tags
 
     def name_taken_by_other(self, name: str, public_key: bytes) -> bool:
         """名字是否已被**另一台**设备占用（同一台设备沿用自己名字不算冲突）。"""
@@ -129,6 +144,8 @@ class KeyStore:
             )
         else:
             entry = PairedDevice(name=name, public_key=public_key, paired_at=now)
+        # 重新配对即解除吊销（用户显式给新配对码 = 明确授权）
+        self._revoked_tags.discard(device_tag(public_key))
         self._devices[name] = entry
         self._save()
         return entry
@@ -154,8 +171,10 @@ class KeyStore:
         return renamed
 
     def unpair(self, name: str) -> bool:
-        if self._devices.pop(name, None) is None:
+        entry = self._devices.pop(name, None)
+        if entry is None:
             return False
+        self._revoked_tags.add(device_tag(entry.public_key))  # 留墓碑：设备重连时能收到明确原因
         self._save()
         return True
 
@@ -164,6 +183,7 @@ class KeyStore:
         if entry is None:
             return None
         self._devices.pop(entry.name, None)
+        self._revoked_tags.add(device_tag(entry.public_key))
         self._save()
         return entry
 
@@ -185,6 +205,7 @@ class KeyStore:
                 paired_at=int(spec.get("paired_at", 0)),
                 renamed_at=spec.get("renamed_at"),
             )
+        self._revoked_tags = {base64.b64decode(t) for t in raw.get("revoked_tags", [])}
 
     def _save(self) -> None:
         payload = {
@@ -198,6 +219,7 @@ class KeyStore:
                 }
                 for name, d in self._devices.items()
             },
+            "revoked_tags": sorted(base64.b64encode(t).decode() for t in self._revoked_tags),
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(self._path.suffix + ".tmp")

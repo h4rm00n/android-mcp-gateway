@@ -24,11 +24,14 @@ from gateway.config import GatewayConfig, ListenConfig, McpConfig, TcpConfig
 from gateway.keystore import KeyStore, device_tag, gen_keypair
 from gateway.main import create_app
 from gateway.noise_wire import (
+    FLAG_REJECT,
     MODE_ENROLL,
     MODE_SESSION,
     PATTERN,
+    REJECT_DEVICE_REVOKED,
     read_message,
     read_plain_frame,
+    read_plain_frame_ex,
     write_message,
     write_plain_frame,
 )
@@ -214,14 +217,17 @@ async def test_unpair_revokes_access(tmp_path):
             body = (await session.call_tool("list_paired_devices", {})).structured_content
             assert body["count"] == 0
 
-        # 再连 → 被拒（公钥已删，tag 查不到 → 服务端直接关闭连接）
+        # 再连 → 被拒。公钥已删，tag 只剩吊销墓碑：网关回一个**明确的拒绝帧**
+        # （而不是静默断开），设备才能区分"被吊销"与"网络抖动"、停机等人工重配对。
         r2, w2 = await asyncio.open_connection("127.0.0.1", tcp_port)
         w2.write(bytes([MODE_SESSION]) + device_tag(dev_pub))
         await w2.drain()
-        data = await asyncio.wait_for(r2.read(1), 3)
-        assert data == b"", "吊销后应被断开（读到 EOF）"
+        flags, payload = await asyncio.wait_for(read_plain_frame_ex(r2), 3)
+        assert flags & FLAG_REJECT, f"吊销后应收到拒绝帧，实际 flags={flags}"
+        assert json.loads(payload.decode())["code"] == REJECT_DEVICE_REVOKED
+        assert await asyncio.wait_for(r2.read(1), 3) == b"", "拒绝帧之后应断开"
         w2.close()
-        print("  ✓ 吊销后无法再连接（连接被服务端关闭）")
+        print("  ✓ 吊销后重连收到 DEVICE_REVOKED 拒绝帧（设备据此停机）")
 
         async with mcp_client(http_port) as session:
             r = await session.call_tool("unpair_device", {"target": "mi14"})

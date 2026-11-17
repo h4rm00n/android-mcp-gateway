@@ -15,7 +15,8 @@ import android.content.SharedPreferences
 object AppConfig {
     const val TOOLSET_VERSION = 1
     const val PROTO_VERSION = 1
-    const val APP_VERSION = "0.1.0"
+    // 取自 build.gradle.kts 的 versionName，避免两处手改漂移（hello 上报给网关的就是它）
+    val APP_VERSION: String = BuildConfig.VERSION_NAME
 
     const val TRANSPORT_WS = "ws"
     const val TRANSPORT_TCP = "tcp"

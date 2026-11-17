@@ -141,8 +141,11 @@ D→G  {"type":"tool_result","id":"c-9f3a","payload":{"ok":false,"error":{"code"
 ## 8. 重连
 
 - 指数退避：1s 起，×2，上限 60s，±30% 抖动；连接稳定 60s 后退避重置。
-- 网络恢复事件（Android `registerNetworkCallback`）→ 立即重连。
+- 网络恢复事件（Android `registerNetworkCallback`）→ 立即重连、退避归零。
+  App 同时监听 `onLost`：网络断开时主动拆链路，避免干等 40s 读超时；
+  维护"可用网络集合"而非布尔标志，以正确处理 WiFi↔蜂窝切换时两个回调的乱序。
 - 每次连接完整重跑 auth + hello；**同 device_id 新连接顶替旧连接**（旧连接由网关 close 4001），用于清理半开僵尸连接。
+- **明确被拒 ≠ 网络抖动**：收到网关的拒绝帧（见 §9.1）时置 fatal 停机，不再重试。
 
 ## 9. WebSocket close code
 
@@ -154,6 +157,23 @@ D→G  {"type":"tool_result","id":"c-9f3a","payload":{"ok":false,"error":{"code"
 | 4004 | 网关主动下线（维护/重启），可在 error 帧携带 `retry_after_s` |
 
 设备对任何 close 都按 §8 重连；收到 4004 时按 `retry_after_s` 延迟。
+
+### 9.1 裸 TCP(Noise) 的拒绝帧
+
+裸 TCP 没有 close code，连接被关只有 EOF。为了让设备区分「被吊销」与「网络抖动」，
+Noise 会话握手阶段（设备发 tag + msg1 之后、网关回 msg2 之前）允许网关回一个**拒绝帧**：
+
+```
+[u32 BE 长度][u8 flags=0x03][明文 JSON]
+                        └─ bit0=末块, bit1=拒绝帧
+payload: {"code": "DEVICE_REVOKED", "message": "..."}
+```
+
+- 正常响应是 Noise msg2（随机字节），靠 `flags` 第 2 位判别，不需要额外协议回合，也不靠"解析失败"来猜。
+- 只有**确知被吊销**的 tag 才回拒绝帧（网关 `keystore.revoked_tags` 墓碑集合）。
+  从未配对过的 tag 一律静默断开——不向未认证对端确认任何信息。
+- 设备收到 `DEVICE_REVOKED` 置 fatal，提示用户重新配对；其它拒绝码按普通连接失败退避重试。
+- **重新配对即解除吊销**：用户重新索要配对码并配对成功，墓碑被清除。
 
 ## 10. 网关配置（示例）
 
@@ -187,7 +207,9 @@ D→G  {"type":"tool_result","id":"c-9f3a","payload":{"ok":false,"error":{"code"
 {"ts":1765700000000,"event":"call","device_id":"mi14","call_id":"c-9f3a","tool":"calendar_create_event","ip":"1.2.3.4"}
 ```
 
-`event` ∈ `auth_ok | auth_fail | online | offline | call | result | timeout | cancel`
+`event` ∈ `auth_ok | auth_fail | online | offline | call | result | timeout | cancel | paired | enroll_ok | enroll_fail | unpaired | device_renamed | pairing_code_issued`
+
+`auth_fail.reason` ∈ `toolset_mismatch | name_in_use | unknown_device | device_revoked | handshake_timeout | rename_rejected | rate_limited`
 
 ## 12. 明确不做（协议层，防过度设计）
 

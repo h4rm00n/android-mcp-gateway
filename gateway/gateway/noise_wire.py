@@ -11,9 +11,17 @@
 
     [u32 BE 总长][u8 flags][payload]
     flags: bit0=0 表示还有后续块；bit0=1 表示末块
+           bit1=1 表示**拒绝帧**（握手前的明文错误，如设备已被吊销）
     payload = Noise 密文的第 k 块
 
 Noise 单条消息明文上限 65535 字节，因此大消息分块传输（协议 §3 的 256KB 上限）。
+
+拒绝帧（session 模式握手阶段）：
+
+    G→D  {code:"DEVICE_REVOKED", message}   明文，flags 打 bit1
+
+设备收到拒绝帧即知"自己被吊销了"而不是"网络抖了"，置 fatal 等人工重新配对。
+只有确知被吊销的 tag 才会收到拒绝帧；从没配对过的 tag 一律静默断开。
 
 配对握手（enroll，明文但安全——码只作 HMAC 密钥）：
 
@@ -46,6 +54,16 @@ HEADER = struct.Struct(">IB")  # 总长 + flags
 TAG_LEN = 8
 HANDSHAKE_TIMEOUT_S = 15
 PATTERN = b"Noise_KK_25519_ChaChaPoly_SHA256"
+
+# 帧 flags：bit0 = 末块，bit1 = **拒绝帧**（握手前的明文错误）。
+#
+# 为什么需要 bit1：会话建立的第一个响应正常是 Noise msg2（随机字节）。如果网关只是
+# 关掉连接，设备分不清"被吊销了"和"网络抽风了"，会当成普通断线永久重试。给拒绝帧
+# 打一个显式标记位，设备就能在握手前确定性地识别，无需靠 JSON 首字节猜。
+FLAG_LAST = 0x01
+FLAG_REJECT = 0x02
+
+REJECT_DEVICE_REVOKED = "DEVICE_REVOKED"
 
 
 class WireError(Exception):
@@ -96,18 +114,39 @@ async def read_message(reader, conn) -> bytes:
 
 async def read_plain_frame(reader) -> bytes:
     """读一个**未加密**帧（配对阶段使用，无 Noise 会话）。"""
+    _flags, payload = await read_plain_frame_ex(reader)
+    return payload
+
+
+async def read_plain_frame_ex(reader) -> tuple[int, bytes]:
+    """读一个未加密帧，连带返回 flags。
+
+    设备侧区分「Noise msg2」与「拒绝帧」用的就是这个 flags：两者在线上是同一种
+    分帧，只差一个比特，因此不需要额外协议回合。
+    """
     header = await reader.readexactly(HEADER.size)
-    length, _flags = HEADER.unpack(header)
+    length, flags = HEADER.unpack(header)
     if length > MAX_MESSAGE_BYTES:
         raise WireError("块长度非法")
-    return await reader.readexactly(length)
+    return flags, await reader.readexactly(length)
 
 
 async def write_plain_frame(writer, payload: bytes) -> None:
     """写一个**未加密**帧（配对阶段使用）。"""
     if len(payload) > MAX_MESSAGE_BYTES:
         raise WireError("帧超限")
-    writer.write(HEADER.pack(len(payload), 1) + payload)
+    writer.write(HEADER.pack(len(payload), FLAG_LAST) + payload)
+    await writer.drain()
+
+
+async def write_reject_frame(writer, code: str, message: str = "") -> None:
+    """写一个**拒绝帧**：握手前的明文原因，带 FLAG_REJECT 让设备确定性识别。
+
+    只在"我们能明确说出原因"的拒绝路径使用（设备已被吊销等）。其它情况（限速、
+    tag 不存在）一律静默断开——不向未认证对端泄露"这个 tag 存在过"。
+    """
+    payload = json.dumps({"code": code, "message": message}).encode()
+    writer.write(HEADER.pack(len(payload), FLAG_LAST | FLAG_REJECT) + payload)
     await writer.drain()
 
 

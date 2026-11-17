@@ -26,3 +26,6 @@ package = false
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["."]
+# 只收集 tests/。scripts/ 下的 test_duration.py / test_recurring.py 是连真机的回归脚本，
+# 末尾有模块级 asyncio.run(main())，被收集会让 pytest 直接 INTERNALERROR 崩掉。
+testpaths = ["tests"]

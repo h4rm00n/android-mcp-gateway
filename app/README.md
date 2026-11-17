@@ -32,11 +32,11 @@ adb shell am start -n dev.amg.device/.MainActivity   # 打开即自动连网关
 
 | 文件 | 内容 |
 |---|---|
-| `GatewayService.kt` | 前台服务（dataSync 类型）+ AgentConnection：hello/心跳（2 次无 ack 重连）/指数退避 1s→60s±30%/TOOLSET_MISMATCH 停机防死循环 |
+| `GatewayService.kt` | 前台服务（dataSync 类型）+ AgentConnection：hello/心跳（2 次无 ack 重连）/指数退避 1s→60s±30%/TOOLSET_MISMATCH 停机/**`DEVICE_REVOKED` 停机等重配对**/**网络恢复即重连**（`registerNetworkCallback`：onAvailable 立即连并重置退避，onLost 主动拆链路避免干等 40s 读超时；维护"可用网络集合"而非布尔标志，因为 WiFi↔蜂窝切换时两个回调顺序不可依赖） |
 | `CalendarTools.kt` | 日历×5。Instances 表展开循环事件；循环事件强制 duration；全天事件 UTC 零点+P1D+eventTimezone=UTC 转换在此层；reminders.method 原样透传；**无日历时自举 LOCAL 日历**（全新系统兜底） |
 | `NotificationTools.kt` | read/dismiss 走 NotificationListenerService（adb 可授予）；post 走自身 NotificationManager。正文按 **BIG_TEXT → EXTRA_MESSAGES（MessagingStyle 聊天消息）→ TEXT_LINES（Inbox）→ TEXT → ticker** 回退提取；附 `app` 显示名（需 Manifest 里的 `<queries>` 包可见性声明）、`sub_text`、`category`。支持 `include_ongoing` / `non_empty_only` 过滤空壳通知 |
 | `AppConfig.kt` | **`TOOLSET_VERSION` 必须与网关 `catalog.py` 同步 bump**；`deviceName`（默认机型名，空白转 `-`）即上报给网关的身份 |
-| `network_security_config.xml` | 仅放行 Waydroid 桥接 IP/模拟器地址的明文 WS，生产 WSS 不受影响 |
+| `network_security_config.xml` | **全局放行明文**（不做 IP 白名单）：安全边界归网关与反代，APK 不参与传输策略；且安卓 `<domain>` 规则不支持 CIDR/通配，白名单会绑死网段 |
 
 坑位记录：`Instances.CONTENT_URI` 已含 `/when`（勿重复 append）；`Calendars` 颜色列是 `CALENDAR_COLOR`；`requestRebind()` 需显式 ComponentName；`adb shell cmd notification allow_listener` 在 MIUI 上可能"显示已授权但实际未绑定"——`disallow_listener` 再 `allow_listener` 可强制重绑。
 
@@ -87,5 +87,6 @@ TLS 由网关前面的反代终结，**App 不参与任何证书/传输策略判
 ## 已知边界（MVP）
 
 - 闹钟实际**触发**由管理日历的日历 App 负责。Waydroid 内的 Etar（org.lineageos.etar）已实测：ALERT 提醒插入即调度、start-60s 秒级触发通知 ✓；ALARM(method=4) Etar 不支持——按设计不降级、透传给日历 App，真闹钟路径在真机小米日历验收。
-- 重连退避已实现；网络恢复回调（ConnectivityManager）未接，靠退避兜底。
+- 重连退避已实现；网络恢复回调（ConnectivityManager）已接：`onAvailable` 立即重连并重置退避，`onLost` 主动拆链路。仍属运维范畴的是 Doze / 国产 ROM 后台查杀（电池优化白名单 + 自启动白名单）。
+- **被吊销后不会无限重试**：网关回 `DEVICE_REVOKED` 拒绝帧 → App 置 fatal 并提示重新配对。重新配对后自动恢复连接。
 - `tool_cancel` 协议预留，网关不转发，设备按 timeout_ms 自终止。

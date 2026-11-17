@@ -10,7 +10,7 @@ AI 客户端 (Claude/Cursor/自研)
       ▼
 ┌────────────────┐     WSS 出站长连接（设备主动出站，穿 NAT，免公网 IP）
 │ 自部署网关       │◄───────────────────────┐
-│ TypeScript      │                        │
+│ Python 3.12     │                        │
 └────────────────┘     ┌──────────────────┴─┐
                        │ Android Agent App   │
                        │ 能力层 + 前台服务保活   │
@@ -132,6 +132,8 @@ availability (BUSY/FREE/TENTATIVE, 可选)
 - **复用**：`session.py` 抽出传输无关的消息循环，WS 与 TCP 共用 hello/heartbeat/tool_call/离线语义，
   工具契约与 `TOOLSET_VERSION` 完全不变。
 - **设备私钥**：X25519 无法进 Keystore 硬件区（所有纯 Java Noise 实现都如此），用 Keystore 内 AES 密钥加密落盘。
+- **吊销要给出明确原因**（2026-11-17 落地）：`unpair_device` 删公钥时在 `keystore.revoked_tags` 留墓碑（只存公钥标签）。设备重连时按 tag 查不到 → 若在墓碑里则回**拒绝帧**（分帧 `flags` bit1 + `{"code":"DEVICE_REVOKED"}`，见 protocol.md §9.1），App 置 fatal 提示重新配对；不在墓碑里（从没配对过）则静默断开，不向未认证对端确认任何信息。重新配对清除墓碑。**没有这个帧的话设备只会看到 EOF，把吊销当成网络抖动永久重试。**
+- **网络恢复即重连**：App 用 `ConnectivityManager.registerNetworkCallback`，`onAvailable` 立即重连并重置退避；`onLost` 主动拆链路（否则要干等 40s 读超时）。维护"可用网络集合"而非布尔标志——WiFi↔蜂窝切换时两个回调顺序不可依赖。`connectAsync` 用 CAS 保证同一时刻只一轮连接（读循环阻塞占线程，重复 submit 会绕过退避连拍），被挡下的唤醒用 `connectAgain` 合并补发。
 
 ## 下一步（新会话从这里开始）
 

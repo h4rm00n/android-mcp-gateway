@@ -116,4 +116,8 @@ adb shell cmd notification allow_listener dev.amg.device/dev.amg.device.AgentNot
 ## 状态
 
 MVP 全部功能已完成并在 Android 13 实机（小米）+ Waydroid 验证：9 个设备工具全链路、
-日历提醒触发（Etar 秒级）、循环事件展开与单实例删除、双设备并存、改名/吊销。
+日历提醒触发（Etar 秒级）、循环事件展开与单实例删除、双设备并存、改名/吊销/重配对。
+
+**裸 TCP + Noise 已在公网实测通过**（国内云服务器非标端口）——当初引入该路径的原始动机
+（规避非标端口上的 HTTP/WS 协议特征拦截）已成立。设备端网络恢复即重连；网关吊销设备时回
+`DEVICE_REVOKED` 拒绝帧，App 停机等人工重新配对而不是无限重试。
