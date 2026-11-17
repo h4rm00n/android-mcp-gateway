@@ -51,6 +51,17 @@ class McpConfig:
 
 
 @dataclass(frozen=True)
+class TcpConfig:
+    """裸 TCP + Noise 传输（实验分支）。与 WS 传输可同时开启。"""
+
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 18438
+    keystore: str = "./gateway.keys"  # 网关静态密钥 + 已配对设备公钥（0600）
+    pairing_ttl_s: int = 300
+
+
+@dataclass(frozen=True)
 class GatewayConfig:
     listen: ListenConfig
     mcp: McpConfig
@@ -58,6 +69,7 @@ class GatewayConfig:
     audit_log: str = "./audit.jsonl"
     audit_max_bytes: int = 10 * 1024 * 1024
     audit_backups: int = 5
+    tcp: TcpConfig = field(default_factory=TcpConfig)
 
 
 def _as_tuple(value: object) -> tuple[str, ...]:
@@ -94,6 +106,15 @@ def load_config(path: str | Path) -> GatewayConfig:
                 file=sys.stderr,
             )
 
+    tcp_raw = raw.get("tcp", {}) or {}
+    tcp = TcpConfig(
+        enabled=bool(tcp_raw.get("enabled", False)),
+        host=str(tcp_raw.get("host", "127.0.0.1")),
+        port=int(tcp_raw.get("port", 18438)),
+        keystore=str(tcp_raw.get("keystore", "./gateway.keys")),
+        pairing_ttl_s=int(tcp_raw.get("pairing_ttl_s", 300)),
+    )
+
     return GatewayConfig(
         listen=listen,
         mcp=mcp,
@@ -101,4 +122,5 @@ def load_config(path: str | Path) -> GatewayConfig:
         audit_log=raw.get("audit_log", "./audit.jsonl"),
         audit_max_bytes=int(raw.get("audit_max_bytes", 10 * 1024 * 1024)),
         audit_backups=int(raw.get("audit_backups", 5)),
+        tcp=tcp,
     )

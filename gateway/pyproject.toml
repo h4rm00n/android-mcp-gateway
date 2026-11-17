@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Android MCP Gateway：聚合安卓设备工具为 MCP (Streamable HTTP)，设备经 WSS 出站长连接注册"
 requires-python = ">=3.12"
 dependencies = [
+    "cryptography>=50.0.2",
     "mcp>=1.12",
+    "noiseprotocol>=0.3.1",
     "starlette>=0.41",
     "uvicorn[standard]>=0.30",
 ]
