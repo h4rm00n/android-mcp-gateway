@@ -77,10 +77,17 @@ async def _handle_conn(
             # 按公钥标签定位——改名后 tag 不变，因此仍能连上
             matched = store.find_by_tag(tag)
             if matched is None:
-                limiter.record_fail(ip)
                 if store.is_revoked(tag):
                     # 曾经配对过、已被吊销：回一个明确原因，设备据此停机等人工重新配对。
                     # 否则设备只会看到连接被关，当成网络抖动无限重试。
+                    #
+                    # 关键：这里**不**调用 limiter.record_fail()。理由有三：
+                    #  ① 这不是"猜密码失败"——tag 已唯一确定是哪台设备，没有暴力破解空间，
+                    #     限速对它没有防护价值；
+                    #  ② 记失败会让 NAT 后面的其它正常设备跟着被封 10 分钟，等于拿整条出口
+                    #     网段当惩罚对象（一台旧 APK 重试 5 次就够触发）；
+                    #  ③ 封禁后连拒绝帧都发不出去（banned 分支直接断开），恰好把我们要
+                    #     传达的那条信息弄丢了——设备只能干等到解封。
                     await audit.log("auth_fail", ip=ip, reason="device_revoked")
                     await write_reject_frame(
                         writer,
@@ -88,7 +95,9 @@ async def _handle_conn(
                         "该设备已被网关吊销，需要在网关上重新生成配对码再配对",
                     )
                     raise WireError("设备已被吊销")
-                # 从没配对过的 tag：静默断开，不向未认证对端确认任何信息
+                # 从没配对过的 tag：静默断开，不向未认证对端确认任何信息。
+                # 这条路径才需要限速——tag 空间可枚举，是真正的探测面。
+                limiter.record_fail(ip)
                 await audit.log("auth_fail", ip=ip, reason="unknown_device")
                 raise WireError("未配对的设备")
 

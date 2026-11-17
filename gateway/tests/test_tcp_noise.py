@@ -32,7 +32,7 @@ from gateway.noise_wire import (
     write_plain_frame,
 )
 from gateway.pairing import PairingManager, compute_proof, derive_key, normalize
-from gateway.ratelimit import AuthRateLimiter
+from gateway.ratelimit import FAIL_LIMIT, AuthRateLimiter
 from gateway.registry import DeviceRegistry
 from gateway.keystore import device_tag
 from gateway.tcp_server import start_tcp_server
@@ -82,8 +82,24 @@ async def server(tmp_path):
 async def enroll_client(
     server: _TestServer, code: str, name: str = "mi14", *, expect_ok: bool = True
 ) -> tuple[bytes, bytes]:
-    """执行配对流程，返回 (设备私钥, 设备公钥)。"""
-    dev_priv, dev_pub = gen_keypair()
+    """执行配对流程，返回 (设备私钥, 设备公钥)。每次生成新密钥。"""
+    return await enroll_with_key(server, code, gen_keypair(), name, expect_ok=expect_ok)
+
+
+async def enroll_with_key(
+    server: _TestServer,
+    code: str,
+    keypair: tuple[bytes, bytes],
+    name: str = "mi14",
+    *,
+    expect_ok: bool = True,
+) -> tuple[bytes, bytes]:
+    """用**指定的设备密钥**执行配对流程。
+
+    真实 App 用 `DeviceKeys.loadOrCreate()` 复用同一把密钥跨多次配对
+    （重新配对不会换密钥），所以"重新配对是否解除吊销"必须用同一把密钥验证。
+    """
+    dev_priv, dev_pub = keypair
     reader, writer = await server.open()
     writer.write(bytes([MODE_ENROLL]))
     await write_plain_frame(
@@ -434,3 +450,121 @@ async def test_tombstone_survives_restart(tmp_path):
     reloaded = KeyStore(store_path)
     assert reloaded.is_revoked(device_tag(pub))
     assert reloaded.device("mi14") is None
+
+
+# ---------------------------------------------------------------- 墓碑重复进/出
+
+
+@pytest.mark.asyncio
+async def test_repeated_pair_revoke_cycles_stay_consistent(server):
+    """反复「配对 → 吊销」多轮（同一把设备密钥）：状态必须每轮都干净。
+
+    真实 App 的 `DeviceKeys.loadOrCreate()` 跨多次配对复用同一把密钥，
+    所以要按同一密钥反复进出验证。墓碑是 set，重复写入不会膨胀；
+    更关键的是每轮 unpair 后 is_revoked 必须为真、pair 后必须为假——
+    否则第二轮起设备就收不到拒绝帧了。
+    """
+    kp = gen_keypair()
+    code = server.pairing.issue("mi14")
+    _, dev_pub = await enroll_with_key(server, code, kp)
+    tag = device_tag(dev_pub)
+    assert tag == device_tag(kp[1])
+
+    for round_no in range(3):
+        assert server.store.device("mi14") is not None, f"第 {round_no + 1} 轮应处于已配对"
+        assert not server.store.is_revoked(tag)
+
+        assert server.store.unpair("mi14") is True
+        assert server.store.is_revoked(tag), f"第 {round_no + 1} 轮吊销后应有墓碑"
+
+        # 用同一把密钥重新配对（App 行为：重新配对不换密钥）
+        code = server.pairing.issue("mi14")
+        await enroll_with_key(server, code, kp)
+        assert not server.store.is_revoked(tag), f"第 {round_no + 1} 轮重配对后墓碑应清除"
+
+        # 墓碑集合不因反复进出而膨胀
+        raw = json.loads(server.store._path.read_text(encoding="utf-8"))
+        assert raw["revoked_tags"] == [], f"当前无吊销，墓碑应为空: {raw['revoked_tags']}"
+
+
+@pytest.mark.asyncio
+async def test_repeated_unpair_is_idempotent(server):
+    """对已吊销（记录已删）的设备再次吊销：返回 False，不改动墓碑状态。"""
+    code = server.pairing.issue("mi14")
+    _, dev_pub = await enroll_client(server, code)
+    tag = device_tag(dev_pub)
+
+    assert server.store.unpair("mi14") is True
+    assert server.store.is_revoked(tag)
+
+    # 再删一次：没有记录可删，返回 False，但墓碑不该丢（并发/重试都可能撞上）
+    assert server.store.unpair("mi14") is False
+    assert server.store.is_revoked(tag), "重复吊销不应清掉已有墓碑"
+
+    assert server.store.unpair_by_public_key(dev_pub) is None
+    assert server.store.is_revoked(tag)
+
+
+@pytest.mark.asyncio
+async def test_revoked_reconnect_never_triggers_ip_ban(server):
+    """被吊销设备反复重连 **不应** 把 IP 打进限速封禁。
+
+    若不记失败：第 N 次仍能收到拒绝帧。
+    记失败（旧实现）的话第 5 次触发封禁，第 6 次起连拒绝帧都发不出——
+    设备只看到 EOF，NAT 后面的其它正常设备也被一起封 10 分钟。
+    """
+    code = server.pairing.issue("mi14")
+    _, dev_pub = await enroll_client(server, code)
+    tag = device_tag(dev_pub)
+    server.store.unpair("mi14")
+
+    for attempt in range(1, 8):  # 远超 5 次失败阈值
+        reader, writer = await server.open()
+        writer.write(bytes([MODE_SESSION]) + tag)
+        await writer.drain()
+        flags, payload = await asyncio.wait_for(read_plain_frame_ex(reader), 5)
+        assert flags & FLAG_REJECT, f"第 {attempt} 次重连应仍收到拒绝帧"
+        assert json.loads(payload.decode())["code"] == REJECT_DEVICE_REVOKED
+        writer.close()
+        await asyncio.sleep(0.01)
+
+    assert not server.limiter.banned("127.0.0.1"), "吊销重连不计入限速，IP 不应被封"
+    assert not server.pairing.is_blocked("127.0.0.1")
+
+
+@pytest.mark.asyncio
+async def test_unknown_tag_still_rate_limited(server):
+    """对比项：从未配对过的 tag 才该计入限速（tag 空间可枚举，是真正的探测面）。"""
+    _, pub = gen_keypair()
+    tag = device_tag(pub)
+
+    for _ in range(FAIL_LIMIT):
+        reader, writer = await server.open()
+        writer.write(bytes([MODE_SESSION]) + tag)
+        await writer.drain()
+        assert await asyncio.wait_for(reader.read(1), 5) == b""
+        writer.close()
+
+    assert server.limiter.banned("127.0.0.1"), "未知 tag 探测 5 次后应封禁"
+
+
+@pytest.mark.asyncio
+async def test_tombstone_accumulates_across_keys_and_name_reuse(tmp_path):
+    """同名换密钥：旧密钥的墓碑保留，新密钥不受影响（判定按公钥不按名字）。"""
+    store = KeyStore(tmp_path / "gw.keys")
+
+    _, pub_a = gen_keypair()
+    store.pair("shared", pub_a)
+    store.unpair("shared")
+    assert store.is_revoked(device_tag(pub_a))
+
+    # 新设备接管同一个名字
+    _, pub_b = gen_keypair()
+    store.pair("shared", pub_b)
+    assert not store.is_revoked(device_tag(pub_b)), "新设备不应被判为已吊销"
+    assert store.is_revoked(device_tag(pub_a)), "旧密钥墓碑应保留（它确实被吊销了）"
+
+    # 第二把密钥也被吊销 → 两条墓碑并存（不同公钥，预期累积而非去重）
+    store.unpair("shared")
+    raw = json.loads((tmp_path / "gw.keys").read_text(encoding="utf-8"))
+    assert len(raw["revoked_tags"]) == 2

@@ -133,6 +133,7 @@ availability (BUSY/FREE/TENTATIVE, 可选)
   工具契约与 `TOOLSET_VERSION` 完全不变。
 - **设备私钥**：X25519 无法进 Keystore 硬件区（所有纯 Java Noise 实现都如此），用 Keystore 内 AES 密钥加密落盘。
 - **吊销要给出明确原因**（2026-11-17 落地）：`unpair_device` 删公钥时在 `keystore.revoked_tags` 留墓碑（只存公钥标签）。设备重连时按 tag 查不到 → 若在墓碑里则回**拒绝帧**（分帧 `flags` bit1 + `{"code":"DEVICE_REVOKED"}`，见 protocol.md §9.1），App 置 fatal 提示重新配对；不在墓碑里（从没配对过）则静默断开，不向未认证对端确认任何信息。重新配对清除墓碑。**没有这个帧的话设备只会看到 EOF，把吊销当成网络抖动永久重试。**
+  - **吊销路径不计入 IP 限速**（2026-11-17 修正）：tag 已唯一确定设备、没有爆破空间，限速无防护价值；记失败会让 NAT 后设备连带被封 10 分钟，且封禁后连拒绝帧都发不出（`banned` 分支先断开）——恰好丢掉要传达的信息。计入限速的只有「未知 tag」（tag 空间可枚举，是真探测面）。
 - **网络恢复即重连**：App 用 `ConnectivityManager.registerNetworkCallback`，`onAvailable` 立即重连并重置退避；`onLost` 主动拆链路（否则要干等 40s 读超时）。维护"可用网络集合"而非布尔标志——WiFi↔蜂窝切换时两个回调顺序不可依赖。`connectAsync` 用 CAS 保证同一时刻只一轮连接（读循环阻塞占线程，重复 submit 会绕过退避连拍），被挡下的唤醒用 `connectAgain` 合并补发。
 
 ## 下一步（新会话从这里开始）
