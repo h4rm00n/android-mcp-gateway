@@ -90,20 +90,7 @@ class MainActivity : Activity() {
 
         nameInput = EditText(this).apply { setText(AppConfig.deviceName); textSize = 13f }
 
-        // --- WS 组 ---
-        urlInput = EditText(this).apply {
-            setText(AppConfig.url); hint = AppConfig.URL_TEMPLATE; textSize = 13f
-        }
-        tokenInput = EditText(this).apply { setText(AppConfig.token); textSize = 13f }
-        wsGroup = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(label("网关地址（wss://host:port/device/ws）"))
-            addView(urlInput)
-            addView(label("配对 token（网关统一发放）"))
-            addView(tokenInput)
-        }
-
-        // --- TCP 组 ---
+        // --- TCP 组（主路径，放前面）---
         pairHostInput = EditText(this).apply {
             setText(AppConfig.pairingHost); hint = AppConfig.TCP_HOST_TEMPLATE; textSize = 13f
         }
@@ -133,6 +120,24 @@ class MainActivity : Activity() {
             addView(pairStatusView)
         }
 
+        // --- WS 组（调试/局域网/备案后）---
+        urlInput = EditText(this).apply {
+            setText(AppConfig.url); hint = AppConfig.URL_TEMPLATE; textSize = 13f
+        }
+        tokenInput = EditText(this).apply { setText(AppConfig.token); textSize = 13f }
+        wsGroup = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(label("网关地址（wss://host:port/device/ws）"))
+            addView(urlInput)
+            addView(label("配对 token（网关统一发放）"))
+            addView(tokenInput)
+            addView(TextView(this@MainActivity).apply {
+                text = "提示：WS 走明文/反代 TLS，适用于局域网调试、抓包排查、或已完成备案后接 443 反代。"
+                textSize = 11f
+                setPadding(0, dp(4), 0, 0)
+            })
+        }
+
         statusView = TextView(this).apply {
             textSize = 12f
             typeface = Typeface.MONOSPACE
@@ -146,13 +151,13 @@ class MainActivity : Activity() {
         }
 
         val transportGroup = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
-        val wsRadio = RadioButton(this).apply { text = "WS (wss)"; id = View.generateViewId() }
         val tcpRadio = RadioButton(this).apply { text = "裸 TCP (Noise)"; id = View.generateViewId() }
+        val wsRadio = RadioButton(this).apply { text = "WS (wss) · 调试"; id = View.generateViewId() }
+        transportGroup.addView(tcpRadio)  // 主路径在前
         transportGroup.addView(wsRadio)
-        transportGroup.addView(tcpRadio)
-        if (AppConfig.transport == AppConfig.TRANSPORT_TCP) tcpRadio.isChecked = true else wsRadio.isChecked = true
+        if (AppConfig.transport == AppConfig.TRANSPORT_WS) wsRadio.isChecked = true else tcpRadio.isChecked = true
         transportGroup.setOnCheckedChangeListener { _, checkedId ->
-            val t = if (checkedId == tcpRadio.id) AppConfig.TRANSPORT_TCP else AppConfig.TRANSPORT_WS
+            val t = if (checkedId == wsRadio.id) AppConfig.TRANSPORT_WS else AppConfig.TRANSPORT_TCP
             AppConfig.transport = t
             applyTransportVisibility(t)
             statusView.append("传输方式切换为 $t（需重新「保存并启动」）\n")
@@ -183,8 +188,8 @@ class MainActivity : Activity() {
         })
         root.addView(label("传输方式"))
         root.addView(transportGroup)
-        root.addView(wsGroup)
-        root.addView(tcpGroup)
+        root.addView(tcpGroup)   // 主路径
+        root.addView(wsGroup)    // 调试/局域网
         root.addView(label("设备名称（登记身份，在线唯一）"))
         root.addView(nameInput)
         root.addView(buttonRow)

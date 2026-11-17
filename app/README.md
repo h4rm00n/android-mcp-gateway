@@ -49,12 +49,15 @@ adb shell am start -n dev.amg.device/.MainActivity   # 打开即自动连网关
 单实例删除走 `EXDATE`（`DTSTART + RRULE + EXDATE` 三件套一起 update）。`calendar_delete_event` 的
 `occurrence_start` 参数即此实现，不传则删整串。
 
-## 传输方式（App 内可切换）
+## 传输方式（App 内可切换，默认 TCP）
 
-| 方式 | 何时用 | 前置 |
+| 方式 | 定位 | 前置 |
 |---|---|---|
-| **WS (wss)** | 常规部署，网关前有反代终结 TLS | 填 `wss://host:port/device/ws` + `pairing_token` |
-| **裸 TCP (Noise)** | 国内云厂商拦截非标端口 HTTP/WS 时 | 填网关 IP/端口 → **配对**（让 AI 生成配对码）→ 启动 |
+| **裸 TCP (Noise)** | **主路径**。无应用层特征，可规避非标端口的 HTTP/WS 拦截 | 填网关 IP/端口 → **配对**（让 AI 生成配对码）→ 启动 |
+| WS (wss) · 调试 | 次路径：局域网调试、抓包排查、或已完成备案走 443 反代 | 填 `wss://host:port/device/ws` + `pairing_token` |
+
+UI 里 TCP 在前、默认选中；WS 折叠在下方并标注"调试"用途。两条路径共用同一套
+消息协议与工具契约，切换只影响底层连接。
 
 裸 TCP 配对流程：
 
@@ -73,7 +76,7 @@ adb shell am start -n dev.amg.device/.MainActivity   # 打开即自动连网关
 | 配对 token | 网关配置里的 `pairing_token`（所有设备共用一个） | `openssl rand -hex 32` 生成的串 |
 | 设备名称 | 自报身份，在线唯一，默认取机型名 | `mi14` |
 
-地址无默认值——首次打开需自行填写（输入框有格式提示）。`ws://` 与 `wss://` 均支持：
+地址无默认值——首次打开需自行填写（输入框有格式提示）。默认传输为 TCP。`ws://` 与 `wss://` 均支持：
 TLS 由网关前面的反代终结，**App 不参与任何证书/传输策略判断**（`network_security_config`
 已全局放行明文，不做 IP 白名单——安卓的 domain 规则不支持 CIDR/通配，白名单反而会绑死网段）。
 

@@ -40,7 +40,7 @@ object AppConfig {
             .ifBlank { "android-device" }
 
     var transport: String
-        get() = prefs.getString("transport", TRANSPORT_WS) ?: TRANSPORT_WS
+        get() = prefs.getString("transport", TRANSPORT_TCP) ?: TRANSPORT_TCP
         set(v) = prefs.edit().putString("transport", v).apply()
 
     var url: String
