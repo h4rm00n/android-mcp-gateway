@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  明文全放行（ws:// 与 wss:// 都可用）。
+
+  TLS 归属决策：证书与加密由网关前的反代（nginx 等）统一处理，App 不参与证书判断，
+  也不在 APK 内做传输策略限制——部署形态（局域网 ws / 反代 wss）由用户填写的地址决定。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

@@ -1,0 +1,11 @@
+{
+  "listen": {
+    "host": "0.0.0.0",
+    "port": 18437,
+    "cert": null,
+    "key": null
+  },
+  "mcp": { "path": "/mcp", "bearer": "mcp-dev-token-0000000000000000" },
+  "pairing_token": "waydroid-dev-token-0001",
+  "audit_log": "./audit-dev.jsonl"
+}

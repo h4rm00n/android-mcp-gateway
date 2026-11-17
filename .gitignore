@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+uv.lock
+
+# 本地配置与凭据
+gateway/config*.json
+!gateway/config.example.json
+!gateway/config.waydroid-dev.json
+*.jsonl
+*.jsonl.*
+
+# 证书与密钥
+certs/
+*.pem
+*.key
+!.gitignore
+
+# Android
+app/.gradle/
+app/local.properties
+app/build/
+app/app/build/
+*.apk
+!*.apk.md5
+
+# 临时
+*.log
+.DS_Store

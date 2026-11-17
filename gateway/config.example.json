@@ -1,0 +1,18 @@
+{
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 18437,
+    "cert": null,
+    "key": null,
+    "trusted_proxies": ["127.0.0.1", "::1"]
+  },
+  "mcp": {
+    "path": "/mcp",
+    "bearer": "change-me-mcp-client-token",
+    "allowed_hosts": ["gw.example.com", "example.com:*"]
+  },
+  "pairing_token": "change-me-pairing-token",
+  "audit_log": "./audit.jsonl",
+  "audit_max_bytes": 10485760,
+  "audit_backups": 5
+}
