@@ -109,6 +109,26 @@ availability (BUSY/FREE/TENTATIVE, 可选)
 - **残余风险（如实声明，已接受）**：① 持 token 者可登记任何未被在线会话占用的名字，包括冒用**离线**设备的名字（在线时会被 NAME_IN_USE 挡住）；② 服务器被攻破（pinning 也挡不住，防线在运维最小化）；③ 配对 token 从设备侧泄露（二期 mTLS 客户端证书绑定硬件密钥才是根治）。**网络路径 MITM 由 TLS（nginx 终结）覆盖；若后续要防域名劫持/CA 误签，在 App 加 OkHttp CertificatePinner 钉 SPKI 指纹，是独立增强项，与反代架构不冲突。**
 - **MCP 侧**：HTTPS + 独立 Bearer 令牌，成熟方案，无需额外设计。
 
+## 传输双路径（2026-11-17）
+
+| 路径 | 状态 | 用途 |
+|---|---|---|
+| **WSS**（master 基线） | ✅ 生产可用 | AI 客户端 ↔ 网关本来就是 HTTP，不受 DPI 影响；设备侧走 wss 需反代终结 TLS |
+| **裸 TCP + Noise**（`experiment/raw-tcp-noise`） | ✅ Waydroid 全链路跑通，待公网实测 | 规避国内云厂商对非标端口 HTTP/WS 的协议特征拦截（实测换端口无效——DPI 按特征识别，不看端口） |
+
+裸 TCP 路径要点（细节见 `docs/raw-tcp-noise.md`）：
+
+- **密码学**：Noise Protocol Framework，`Noise_KK_25519_ChaChaPoly_SHA256`（与 WireGuard 同套件）。
+  Python `noiseprotocol` 0.3.1 ↔ Java `com.github.auties00:noise-java:1.2` **已实测互通**。
+  **不自研密码学**——之前否决的"取公钥/明文传密文"方案等于重写 TLS。
+- **配对**：AI 调 `generate_pairing_code` 生成 8 字符 Crockford Base32 码（40 bit），人眼读取填入手机。
+  **码只作 HMAC 密钥，永不上网**（proof = HMAC(PBKDF2(码,salt), role‖nonce‖设备名‖双方公钥)）。
+  PBKDF2 300k + TTL 5min + 单次有效 + 失败限速（防 CPU DoS）。双向 proof 提供 MITM 检测。
+- **身份**：配对即绑定 name↔静态公钥，后续连接走 KK（双向认证）。设备先发 `SHA256(名字)[:8]` 定位公钥。
+- **复用**：`session.py` 抽出传输无关的消息循环，WS 与 TCP 共用 hello/heartbeat/tool_call/离线语义，
+  工具契约与 `TOOLSET_VERSION` 完全不变。
+- **设备私钥**：X25519 无法进 Keystore 硬件区（所有纯 Java Noise 实现都如此），用 Keystore 内 AES 密钥加密落盘。
+
 ## 下一步（新会话从这里开始）
 
 1. ~~写协议文档~~ ✅ `docs/protocol.md` v1。

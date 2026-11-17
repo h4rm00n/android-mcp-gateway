@@ -49,6 +49,22 @@ adb shell am start -n dev.amg.device/.MainActivity   # 打开即自动连网关
 单实例删除走 `EXDATE`（`DTSTART + RRULE + EXDATE` 三件套一起 update）。`calendar_delete_event` 的
 `occurrence_start` 参数即此实现，不传则删整串。
 
+## 传输方式（App 内可切换）
+
+| 方式 | 何时用 | 前置 |
+|---|---|---|
+| **WS (wss)** | 常规部署，网关前有反代终结 TLS | 填 `wss://host:port/device/ws` + `pairing_token` |
+| **裸 TCP (Noise)** | 国内云厂商拦截非标端口 HTTP/WS 时 | 填网关 IP/端口 → **配对**（让 AI 生成配对码）→ 启动 |
+
+裸 TCP 配对流程：
+
+1. 对 AI 说"给 mi14 生成配对码"，AI 调用 `generate_pairing_code` 得到如 `K7M2-P9XR`
+2. App 里选「裸 TCP (Noise)」，填主机/端口，填入配对码，点「配对」
+3. 看到「✓ 配对成功（网关公钥 …）」即完成；点「保存并启动」
+4. 之后启动不再需要配对码（已落盘 name↔公钥）
+
+配对成功后设备私钥用 Keystore 内 AES 密钥加密落盘（X25519 无法直接进 Keystore 硬件区）。
+
 ## 配置（App 界面三项，无内置默认值）
 
 | 项 | 说明 | 示例 |
